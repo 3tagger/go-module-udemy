@@ -216,3 +216,57 @@ func TestTools_CreateDirIfNotExist(t *testing.T) {
 
 	os.Remove(dir)
 }
+
+func TestTools_Slugify(t *testing.T) {
+	var testTool Tools
+
+	testCases := []struct {
+		name     string
+		input    string
+		expected string
+		hasErr   bool
+	}{
+		{
+			name:     "empty string, error",
+			input:    "",
+			expected: "",
+			hasErr:   true,
+		},
+		{
+			name:     "standard string, no error",
+			input:    "this should be slug 123",
+			expected: "this-should-be-slug-123",
+			hasErr:   false,
+		},
+		{
+			name:     "all non alphanumeric characters, error",
+			input:    "!@*(!*@$(!&(@!&<><>><",
+			expected: "",
+			hasErr:   true,
+		},
+		{
+			name:     "japanese string, error",
+			input:    "こんにちは世界",
+			expected: "",
+			hasErr:   true,
+		},
+		{
+			name:     "standard and japanese string, no error",
+			input:    "hello world こんにちは世界",
+			expected: "hello-world",
+			hasErr:   false,
+		},
+	}
+
+	for _, tc := range testCases {
+		got, err := testTool.Slugify(tc.input)
+		if got != tc.expected {
+			t.Errorf("%s: expected %q, got %q", tc.name, tc.expected, got)
+		}
+		if tc.hasErr && err == nil {
+			t.Errorf("%s: expecting got an error, didn't get any", tc.name)
+		} else if !tc.hasErr && err != nil {
+			t.Errorf("%s: expecting no error, got one: %q", tc.name, err)
+		}
+	}
+}
