@@ -194,3 +194,25 @@ func TestTools_UploadOneFile(t *testing.T) {
 	_ = os.Remove(fmt.Sprintf("./testdata/uploads/%s", file.NewFileName))
 
 }
+
+func TestTools_CreateDirIfNotExist(t *testing.T) {
+	var testTool Tools
+
+	dir := "./testdata/myDir"
+
+	err := testTool.CreateDirIfNotExist(dir)
+	if err != nil {
+		t.Error(err.Error())
+	}
+
+	err = testTool.CreateDirIfNotExist(dir)
+	if err != nil {
+		t.Error(err.Error())
+	}
+
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		t.Errorf("directory %q expected to be exist, but it doesn't", dir)
+	}
+
+	os.Remove(dir)
+}

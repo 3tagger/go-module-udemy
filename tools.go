@@ -67,6 +67,11 @@ func (t *Tools) UploadFiles(r *http.Request, uploadDir string, rename ...bool) (
 		return nil, errors.New("the uploaded file is too big")
 	}
 
+	err = t.CreateDirIfNotExist(uploadDir)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, fHeaders := range r.MultipartForm.File {
 		for _, hdr := range fHeaders {
 			uploadedFiles, err = func(uploadedFiles []*UploadedFile) ([]*UploadedFile, error) {
@@ -141,4 +146,17 @@ func (t *Tools) UploadFiles(r *http.Request, uploadDir string, rename ...bool) (
 	}
 
 	return uploadedFiles, nil
+}
+
+// CreateDirIfNotExist is used to create a directory if the given path does not exists
+func (t *Tools) CreateDirIfNotExist(path string) error {
+	const mode = 0755
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		err := os.MkdirAll(path, mode)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
