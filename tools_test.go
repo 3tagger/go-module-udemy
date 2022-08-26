@@ -1,10 +1,14 @@
 package toolkit
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/png"
 	"io"
+	"io/ioutil"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -294,5 +298,213 @@ func TestTools_DownloadStaticFile(t *testing.T) {
 	_, err := io.ReadAll(res.Body)
 	if err != nil {
 		t.Error(err)
+	}
+}
+
+func TestTools_ReadJSON(t *testing.T) {
+	testcases := []struct {
+		name          string
+		json          string
+		errorExpected bool
+		maxSize       int64
+		allowUnknown  bool
+	}{
+		{
+			name:          "good json",
+			json:          `{"foo":"bar"}`,
+			errorExpected: false,
+			maxSize:       1024,
+			allowUnknown:  false,
+		},
+		{
+			name:          "badly formatted json",
+			json:          `{"foo":}`,
+			errorExpected: true,
+			maxSize:       1024,
+			allowUnknown:  false,
+		},
+		{
+			name:          "incorrect type json",
+			json:          `{"foo": 1}`,
+			errorExpected: true,
+			maxSize:       1024,
+			allowUnknown:  false,
+		},
+		{
+			name:          "double json",
+			json:          `{"foo": "bar"}{"foo": "bar"}`,
+			errorExpected: true,
+			maxSize:       1024,
+			allowUnknown:  false,
+		},
+		{
+			name:          "empty json",
+			json:          ``,
+			errorExpected: true,
+			maxSize:       1024,
+			allowUnknown:  false,
+		},
+		{
+			name:          "syntax error in json",
+			json:          `{"foo": 1"`,
+			errorExpected: true,
+			maxSize:       1024,
+			allowUnknown:  false,
+		},
+		{
+			name:          "syntax error in json",
+			json:          `{"foo": 1"`,
+			errorExpected: true,
+			maxSize:       1024,
+			allowUnknown:  false,
+		},
+		{
+			name:          "syntax error in json",
+			json:          `{"bar": "bar"}`,
+			errorExpected: true,
+			maxSize:       1024,
+			allowUnknown:  false,
+		},
+		{
+			name:          "allow unknown field in json",
+			json:          `{"bar": "bar"}`,
+			errorExpected: false,
+			maxSize:       1024,
+			allowUnknown:  true,
+		},
+		{
+			name:          "size too large json",
+			json:          `{"foo": "bar"}`,
+			errorExpected: true,
+			maxSize:       1,
+			allowUnknown:  false,
+		},
+		{
+			name:          "missing field name json",
+			json:          `{foo: "bar"}`,
+			errorExpected: true,
+			maxSize:       1024,
+			allowUnknown:  false,
+		},
+		{
+			name:          "not json",
+			json:          `hello there`,
+			errorExpected: true,
+			maxSize:       1024,
+			allowUnknown:  false,
+		},
+	}
+
+	testTool := Tools{}
+
+	for _, tc := range testcases {
+		testTool.MaxJSONSize = tc.maxSize
+		testTool.AllowUnknownFields = tc.allowUnknown
+
+		var decodedJSON struct {
+			Foo string `json:"foo"`
+		}
+
+		req, err := http.NewRequest("POST", "/", bytes.NewReader([]byte(tc.json)))
+		if err != nil {
+			t.Log("error: ", err)
+		}
+
+		rr := httptest.NewRecorder()
+
+		err = testTool.ReadJSON(rr, req, &decodedJSON)
+		if err != nil && !tc.errorExpected {
+			t.Errorf("%s: expecting no error, got error: %s", tc.name, err)
+		}
+
+		if err == nil && tc.errorExpected {
+			t.Errorf("%s: expecting error, got no error", tc.name)
+		}
+
+		req.Body.Close()
+	}
+}
+
+func TestTools_WriteJSON(t *testing.T) {
+	rr := httptest.NewRecorder()
+	jsonData := JSONResponse{
+		Error:   false,
+		Message: "Foo",
+		Data:    "Bar",
+	}
+
+	toolTest := Tools{}
+
+	header := http.Header{}
+	header.Set("FOO", "BAR")
+
+	err := toolTest.WriteJSON(rr, http.StatusOK, jsonData, header)
+	if err != nil {
+		t.Error("not expecting any error, got: ", err)
+	}
+
+	if rr.Result().Header.Get("FOO") != "BAR" {
+		t.Errorf("expecting header to have %q, there is none", "BAR")
+	}
+
+	if rr.Result().Header.Get("Content-Type") == "application/json" {
+		t.Errorf("expecting header to have %q, there is none", "application/json")
+	}
+}
+
+func TestTools_ErrorJSON(t *testing.T) {
+	testTools := Tools{}
+
+	rr := httptest.NewRecorder()
+	err := testTools.ErrorJSON(rr, errors.New("test error"), http.StatusServiceUnavailable)
+	if err != nil {
+		t.Error(err)
+	}
+
+	var payload JSONResponse
+	err = json.NewDecoder(rr.Body).Decode(&payload)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if !payload.Error {
+		t.Errorf("expected to have error")
+	}
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected to have error %q, got %q", http.StatusServiceUnavailable, rr.Code)
+	}
+}
+
+type RoundTripFunc func(req *http.Request) *http.Response
+
+func (f RoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req), nil
+}
+
+func NewTestClient(fn RoundTripFunc) *http.Client {
+	return &http.Client{
+		Transport: fn,
+	}
+}
+
+func TestTools_PushJSONToRemote(t *testing.T) {
+	client := NewTestClient(func(req *http.Request) *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       ioutil.NopCloser(bytes.NewBufferString("ok")),
+			Header:     http.Header{},
+		}
+	})
+
+	testTools := Tools{}
+	var foo struct {
+		Bar string `json:"bar"`
+	}
+	foo.Bar = "bar"
+
+	_, err := testTools.PushJSONToRemote("http://example.some.path", foo, client)
+	if err != nil {
+		t.Error("There should be no error: ", err)
 	}
 }

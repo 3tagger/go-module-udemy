@@ -1,7 +1,9 @@
 package toolkit
 
 import (
+	"bytes"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,14 +15,17 @@ import (
 	"strings"
 )
 
-const defaultMaxFileSize = 1024 * 1024
+const defaultMaxFileSize = 1024 * 1024 // 1 MB
+const defaultMaxJSONSize = 1024 * 1024 // 1 MB
 const randomStringSource = "abcdefghijklmnopqrstuvwyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567889"
 
 // Tools is the type used to instantiate this module.
 // Any variable of this type will have access to all the methods with the receiver *Tools
 type Tools struct {
-	MaxFileSize      int64
-	AllowedFileTypes []string
+	MaxFileSize        int64
+	AllowedFileTypes   []string
+	MaxJSONSize        int64
+	AllowUnknownFields bool
 }
 
 // RandomString returns a string of random alphanumerical characters of length n,
@@ -188,4 +193,127 @@ func (t *Tools) DownloadStaticFile(w http.ResponseWriter, r *http.Request, p, fi
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", displayName))
 
 	http.ServeFile(w, r, fp)
+}
+
+// JSONResponse is the type used for sending JSON around
+type JSONResponse struct {
+	Error   bool        `json:"error"`
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
+}
+
+// ReadJSON is used to read request and then send it back
+func (t *Tools) ReadJSON(w http.ResponseWriter, r *http.Request, data interface{}) error {
+	maxSize := int64(defaultMaxJSONSize)
+	if t.MaxJSONSize != 0 {
+		maxSize = t.MaxJSONSize
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
+
+	dec := json.NewDecoder(r.Body)
+
+	if !t.AllowUnknownFields {
+		dec.DisallowUnknownFields()
+	}
+
+	err := dec.Decode(data)
+	if err != nil {
+		var syntaxError *json.SyntaxError
+		var unmarshalTypeError *json.UnmarshalTypeError
+		var invalidUnmarshalError *json.InvalidUnmarshalError
+
+		switch {
+		case errors.As(err, &syntaxError):
+			return fmt.Errorf("body contains badly-formed JSON (at character %d)", syntaxError.Offset)
+		case errors.As(err, &unmarshalTypeError):
+			return fmt.Errorf("body contains badly-formed JSON")
+		case errors.As(err, &invalidUnmarshalError):
+			if unmarshalTypeError.Field != "" {
+				return fmt.Errorf("body contains incorrect JSON type for field %q", unmarshalTypeError.Field)
+			}
+			return fmt.Errorf("body contains incorrect JSON type (at character %d)", unmarshalTypeError.Offset)
+		case errors.Is(err, io.EOF):
+			return errors.New("body must not be empty")
+		case strings.HasPrefix(err.Error(), "json: unknown field"):
+			fieldName := strings.TrimPrefix(err.Error(), "json: unknown field")
+			return fmt.Errorf("body contains unknown key %s", fieldName)
+		case err.Error() == "http: request body too large":
+			return fmt.Errorf("body must not be larger than %d bytes", maxSize)
+		case errors.As(err, &invalidUnmarshalError):
+			return fmt.Errorf("error unmarshalling JSON: %s", err)
+		default:
+			return err
+		}
+	}
+
+	err = dec.Decode(&struct{}{})
+	if err != io.EOF {
+		return errors.New("body must contain only one JSON value")
+	}
+
+	return nil
+}
+
+// WriteJSON takes response, request, status, data, will respond to client in JSON
+func (t *Tools) WriteJSON(w http.ResponseWriter, status int, data interface{}, headers ...http.Header) error {
+	if len(headers) > 0 {
+		for key, value := range headers[0] {
+			w.Header()[key] = value
+		}
+	}
+
+	w.Header().Set("Application-Type", "application/json")
+	w.WriteHeader(status)
+	err := json.NewEncoder(w).Encode(data)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// ErrorJSON is used to format an error into JSON response
+func (t *Tools) ErrorJSON(w http.ResponseWriter, err error, status ...int) error {
+	statusCode := http.StatusBadRequest
+
+	if len(status) > 0 {
+		statusCode = status[0]
+	}
+
+	errResponse := JSONResponse{
+		Error:   true,
+		Message: err.Error(),
+	}
+
+	return t.WriteJSON(w, statusCode, errResponse)
+}
+
+// PushJSONToRemote is used to push JSON to specified uri
+// Http client is optional, if not specified we use default Http Client
+func (t *Tools) PushJSONToRemote(uri string, data interface{}, client ...*http.Client) (*http.Response, error) {
+	payload, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", uri, bytes.NewBuffer(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	var httpClient http.Client
+	if len(client) > 0 {
+		httpClient = *client[0]
+	} else {
+		httpClient = http.Client{}
+	}
+
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	// defer res.Body.Close()
+
+	return res, nil
 }
